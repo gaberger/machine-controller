@@ -54,6 +54,7 @@ type RawConfig struct {
 	BillingCycle providerconfig.ConfigVarString   `json:"billingCycle"`
 	InstanceType providerconfig.ConfigVarString   `json:"instanceType"`
 	Facilities   []providerconfig.ConfigVarString `json:"facilities"`
+	OperatingSystem providerconfig.ConfigVarString `json:"os"`
 	Tags         []providerconfig.ConfigVarString `json:"tags"`
 }
 
@@ -62,6 +63,7 @@ type Config struct {
 	ProjectID    string
 	BillingCycle string
 	InstanceType string
+	OperatingSystem string
 	Facilities   []string
 	Tags         []string
 }
@@ -116,6 +118,10 @@ func (p *provider) getConfig(s v1alpha1.ProviderSpec) (*Config, *RawConfig, *pro
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to get the value of \"billingCycle\" field, error = %v", err)
 	}
+	c.OperatingSystem, err = p.configVarResolver.GetConfigVarStringValue(rawConfig.OperatingSystem)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to get the value of \"OperatingSystem\" field, error = %v", err)
+	}	
 	for i, tag := range rawConfig.Tags {
 		tagValue, err := p.configVarResolver.GetConfigVarStringValue(tag)
 		if err != nil {
@@ -169,11 +175,18 @@ func (p *provider) Validate(spec v1alpha1.MachineSpec) error {
 	if c.ProjectID == "" {
 		return errors.New("projectID is missing")
 	}
+	if c.OperatingSystem == "" {
+		return errors.New("OperatingSystem is missing")
+	}
+	if pc.OperatingSystem == "" {
+		return errors.New("OperatingSystem is missing")
+	}
 
-	_, err = getNameForOS(pc.OperatingSystem)
+	/*_, err = getNameForOS(pc.OperatingSystem)
 	if err != nil {
 		return fmt.Errorf("invalid/not supported operating system specified %q: %v", pc.OperatingSystem, err)
 	}
+	*/
 
 	client := getClient(c.APIKey)
 
@@ -202,11 +215,24 @@ func (p *provider) Validate(spec v1alpha1.MachineSpec) error {
 		return fmt.Errorf("unknown instance type / plan: %s, acceptable plans: %s", strings.Join(missingPlans, ","), strings.Join(validPlanNames, ","))
 	}
 
+	// get all valid operating systems
+	operatingSystems, _, err := client.OperatingSystems.List()
+	if err != nil {
+		return fmt.Errorf("failed to list operating systems: %v", err)
+	}
+
+// ensure our requested os distro is available 
+	validOsDistros := osProp(operatingSystems, "Name")
+	if missingDistro := itemsNotInList(validOsDistros, []string{c.InstanceType}); len(missingDistro) > 0 {
+	return fmt.Errorf("unknown instance type / os: %s, acceptable os: %s", strings.Join(missingDistro, ","), strings.Join(validOsDistros, ","))
+	}	
+
 	return nil
 }
 
 func (p *provider) Create(machine *v1alpha1.Machine, _ *cloudprovidertypes.MachineCreateDeleteData, userdata string) (instance.Instance, error) {
-	c, _, pc, err := p.getConfig(machine.Spec.ProviderSpec)
+	//c, _, pc, err := p.getConfig(machine.Spec.ProviderSpec)
+	c, _, _, err := p.getConfig(machine.Spec.ProviderSpec)
 	if err != nil {
 		return nil, cloudprovidererrors.TerminalError{
 			Reason:  common.InvalidConfigurationMachineError,
@@ -216,13 +242,16 @@ func (p *provider) Create(machine *v1alpha1.Machine, _ *cloudprovidertypes.Machi
 
 	client := getClient(c.APIKey)
 
-	imageName, err := getNameForOS(pc.OperatingSystem)
+	//imageName, err := getNameForOS(pc.OperatingSystem)
+	//imageName := pc.OperatingSystem
+	/*
 	if err != nil {
 		return nil, cloudprovidererrors.TerminalError{
 			Reason:  common.InvalidConfigurationMachineError,
 			Message: fmt.Sprintf("Invalid operating system specified %q, details = %v", pc.OperatingSystem, err),
 		}
-	}
+		}
+	*/
 
 	serverCreateOpts := &packngo.DeviceCreateRequest{
 		Hostname:     machine.Spec.Name,
@@ -231,7 +260,8 @@ func (p *provider) Create(machine *v1alpha1.Machine, _ *cloudprovidertypes.Machi
 		Facility:     c.Facilities,
 		BillingCycle: c.BillingCycle,
 		Plan:         c.InstanceType,
-		OS:           imageName,
+		//OS:           imageName,
+		OS:           c.OperatingSystem,
 		Tags: []string{
 			generateTag(string(machine.UID)),
 		},
@@ -424,7 +454,7 @@ func getDeviceByTag(client *packngo.Client, projectID, tag string) (*packngo.Dev
 }
 
 // given a defined Kubermatic constant for an operating system, return the canonical slug for Packet
-func getNameForOS(os providerconfig.OperatingSystem) (string, error) {
+/*func getNameForOS(os providerconfig.OperatingSystem) (string, error) {
 	switch os {
 	case providerconfig.OperatingSystemUbuntu:
 		return "ubuntu_18_04", nil
@@ -435,6 +465,7 @@ func getNameForOS(os providerconfig.OperatingSystem) (string, error) {
 	}
 	return "", providerconfig.ErrOSNotSupported
 }
+*/
 
 func getClient(apiKey string) *packngo.Client {
 	return packngo.NewClientWithAuth("kubermatic", apiKey, nil)
@@ -509,6 +540,15 @@ func facilityProp(vs []packngo.Facility, field string) []string {
 }
 
 func planProp(vs []packngo.Plan, field string) []string {
+	vsm := make([]string, len(vs))
+	for i, v := range vs {
+		val := reflect.ValueOf(v)
+		vsm[i] = val.FieldByName(field).String()
+	}
+	return vsm
+}
+
+func osProp(vs []packngo.OS, field string) []string {
 	vsm := make([]string, len(vs))
 	for i, v := range vs {
 		val := reflect.ValueOf(v)
